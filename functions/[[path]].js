@@ -41,6 +41,7 @@ let privateTlds = new Set();
 let redirectRules = new Map(); // domain → target domain
 let blocklistLastFetch = 0;
 let blocklistPromise = null;
+let blocklistsFetched = false; // Track if lists have been fetched at least once
 
 // ==================== AD BLOCK ====================
 async function fetchList(url) {
@@ -74,11 +75,10 @@ async function fetchRedirectRules(url) {
 }
 
 async function refreshBlocklists(baseUrl) {
-  const anyListEmpty = (AD_BLOCK_ENABLED && adBlocklist.size === 0) || 
-                       (BLOCK_PRIVATE_TLD && privateTlds.size === 0) || 
-                       (DNS_REDIRECT_ENABLED && redirectRules.size === 0);
-  
-  if (Date.now() - blocklistLastFetch < ALL_LISTS_REFRESH_INTERVAL && !anyListEmpty) return;
+  // Skip refresh if:
+  // 1. Already fetched at least once AND
+  // 2. Within refresh interval
+  if (blocklistsFetched && Date.now() - blocklistLastFetch < ALL_LISTS_REFRESH_INTERVAL) return;
 
   if (blocklistPromise) return blocklistPromise;
 
@@ -97,11 +97,13 @@ async function refreshBlocklists(baseUrl) {
         DNS_REDIRECT_ENABLED ? fetchRedirectRules(rUrl) : Promise.resolve(new Map())
       ]);
 
-      if (AD_BLOCK_ENABLED && block.size > 0) { adBlocklist = block; adAllowlist = allow; }
-      if (BLOCK_PRIVATE_TLD && privateList.size > 0) { privateTlds = privateList; }
-      if (DNS_REDIRECT_ENABLED && redirRules.size > 0) { redirectRules = redirRules; }
+      // Always update state, even if lists are empty (to prevent infinite re-fetch)
+      if (AD_BLOCK_ENABLED) { adBlocklist = block; adAllowlist = allow; }
+      if (BLOCK_PRIVATE_TLD) { privateTlds = privateList; }
+      if (DNS_REDIRECT_ENABLED) { redirectRules = redirRules; }
 
       blocklistLastFetch = Date.now();
+      blocklistsFetched = true; // Mark as fetched to prevent infinite re-fetch
     } finally { blocklistPromise = null; }
   })();
 
@@ -295,7 +297,6 @@ function buildNodata(query) {
   return res.buffer;
 }
 
-// FIX #7 helper: Build SERVFAIL response mirroring query flags
 function buildServfail(query) {
   const v = new Uint8Array(query);
   if (v.length < 12) {
@@ -666,13 +667,11 @@ async function resolveQuery(query, clientIP) {
 // ==================== HELPERS ====================
 // Ensure blocklists are loaded (await on first load, background refresh after)
 async function ensureBlocklistsLoaded(url, context) {
-  const anyListEmpty = (AD_BLOCK_ENABLED && adBlocklist.size === 0) || 
-                       (BLOCK_PRIVATE_TLD && privateTlds.size === 0) || 
-                       (DNS_REDIRECT_ENABLED && redirectRules.size === 0);
-  
-  if (anyListEmpty) {
+  if (!blocklistsFetched) {
+    // First time: await to ensure lists are loaded
     await refreshBlocklists(url);
   } else if (context) {
+    // Already fetched: background refresh only
     context.waitUntil(refreshBlocklists(url));
   }
 }
